@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ESP32 Flowmeter Dashboard</title>
+  <meta name="description" content="Live 5-camera dashboard with OCR readings. Zero-config. Drops into any static host." />
+  <style>
+    :root { --bg:#0b1020; --card:#111830; --muted:#7d8db1; --accent:#7aa2ff; --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+           background: radial-gradient(1200px 800px at 20% -10%, #18213f 0%, transparent 60%), var(--bg); color:#e6edff; }
+    .wrap { max-width: 1300px; margin: 0 auto; padding: 18px; }
+    header { display:flex; gap:14px; align-items:center; justify-content:space-between; margin-bottom: 16px; }
+    .brand { display:flex; align-items:center; gap:12px; }
+    .brand h1 { font-size: 20px; margin:0; letter-spacing:.3px; }
+    .pill { font-size:12px; padding:6px 10px; border-radius:999px; background:#172149; color:#cfd9ff; border:1px solid #233069; }
+    .pill.ok { background:rgba(34,197,94,.12); border-color: rgba(34,197,94,.35); color:#a7f3d0; }
+    .pill.warn { background:rgba(245,158,11,.12); border-color: rgba(245,158,11,.35); color:#fde68a; }
+    .pill.err { background:rgba(239,68,68,.12); border-color: rgba(239,68,68,.35); color:#fecaca; }
+    .grid { display:grid; grid-template-columns: repeat(5, 1fr); gap:14px; }
+    @media (max-width: 1200px){ .grid{ grid-template-columns: repeat(3, 1fr);} }
+    @media (max-width: 800px){ .grid{ grid-template-columns: repeat(2, 1fr);} }
+    @media (max-width: 540px){ .grid{ grid-template-columns: 1fr; } }
+    .card { background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,0)) , var(--card); border:1px solid #21305e; border-radius: 16px; overflow:hidden; box-shadow: 0 10px 30px rgba(3,8,20,.35) inset, 0 12px 30px rgba(3,8,20,.25); }
+    .card header { padding:10px 12px; border-bottom:1px solid #1f2a56; background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,0)); }
+    .card h3 { margin:0; font-size:14px; font-weight:600; letter-spacing:.25px; }
+    .feed { position: relative; background:#0a0f1f; aspect-ratio: 4 / 3; display:flex; align-items:center; justify-content:center; }
+    .feed img, .feed video { width:100%; height:100%; object-fit: cover; display:block; }
+    .fallback { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#93a5d3; border-top:1px dashed #253261; }
+    .meta { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px 12px; }
+    .reading { font-size:22px; font-weight:800; letter-spacing: .08em; color:#e9f1ff; }
+    .label { font-size:11px; color: var(--muted); letter-spacing:.08em; text-transform: uppercase; }
+    .ts { font-feature-settings: "tnum"; font-variant-numeric: tabular-nums; color:#9fb0db; font-size:12px; }
+    .footer { display:flex; gap:10px; align-items:center; justify-content:space-between; margin-top:14px; color: #9fb0db; font-size:12px; }
+    .link { color:#cfe0ff; text-decoration: none; border-bottom: 1px dotted #2a3a73; }
+    .link:hover { color:#fff; border-color:#4c66d8; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2l3.5 6H20l-3.5 6L20 20h-4.5L12 22l-3.5-2H4l3.5-6L4 8h4.5L12 2z" stroke="#7aa2ff" stroke-width="1.2" fill="none"/>
+        </svg>
+        <h1>ESP32 Flowmeter Dashboard</h1>
+      </div>
+      <div id="mode-pill" class="pill warn">Detecting…</div>
+    </header>
+
+    <div id="app" class="grid"></div>
+
+    <div class="footer">
+      <div>
+        <span class="label">Status:</span> <span id="status-text">Booting UI…</span>
+      </div>
+      <div>
+        <span class="label">Endpoints:</span>
+        <code id="endpoint-info">/api/readings · /stream/cam{1-5}</code>
+      </div>
+    </div>
+  </div>
+
+  <!-- React via CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script>
+  (function(){
+    const { useEffect, useState, useRef } = React;
+
+    const DEFAULT_CAMS = [
+      { id: 1, name: 'ME Flowmeter' },
+      { id: 2, name: 'Boiler Flowmeter' },
+      { id: 3, name: 'GE IN Flowmeter' },
+      { id: 4, name: 'GE OUT Flowmeter' },
+      { id: 5, name: 'Cylinder Oil Flowmeter' },
+    ];
+
+    const API_BASE = (new URLSearchParams(location.search).get('apiBase')) || '';
+
+    function formatTs(ts){
+      try {
+        const d = ts ? new Date(ts) : new Date();
+        return d.toLocaleString();
+      } catch(e){ return String(ts || ''); }
+    }
+
+    function Card({ cam, reading, onStreamError }){
+      const [imgOk, setImgOk] = useState(true);
+      const src = API_BASE + `/stream/cam${cam.id}`; // expected MJPEG
+      return (
+        React.createElement('div', { className: 'card' },
+          React.createElement('header', null,
+            React.createElement('h3', null, cam.name)
+          ),
+          React.createElement('div', { className: 'feed' },
+            imgOk ? React.createElement('img', {
+              src,
+              alt: cam.name,
+              onError: () => { setImgOk(false); onStreamError && onStreamError(); },
+            }) : React.createElement('div', { className: 'fallback' },
+              React.createElement('div', {style:{textAlign:'center', padding:'12px'}},
+                React.createElement('div', {style:{fontSize:'13px', marginBottom:'6px', color:'#9fb0db'}}, 'No Stream'),
+                React.createElement('div', {style:{fontSize:'12px', color:'#7d8db1'}}, 'Demo preview active')
+              )
+            )
+          ),
+          React.createElement('div', { className: 'meta' },
+            React.createElement('div', null,
+              React.createElement('div', { className: 'label' }, 'Reading'),
+              React.createElement('div', { className: 'reading' }, reading.display)
+            ),
+            React.createElement('div', { className: 'ts' }, formatTs(reading.updatedAt))
+          )
+        )
+      );
+    }
+
+    function useLiveData(setAppMode){
+      const [data, setData] = useState({ mode:'detecting', meters: [] });
+      const errorCount = useRef(0);
+
+      useEffect(() => {
+        let stop = false;
+        const controller = new AbortController();
+
+        async function tryFetch(){
+          try {
+            const r = await fetch(API_BASE + '/api/readings', { signal: controller.signal, cache:'no-store' });
+            if(!r.ok) throw new Error('HTTP '+r.status);
+            const j = await r.json();
+            if(stop) return;
+            setData({ mode:'live', meters: j.meters });
+            setAppMode('live');
+            errorCount.current = 0;
+          } catch(e){
+            errorCount.current++;
+            if(errorCount.current > 1){ // after first failure, switch to demo
+              setAppMode('demo');
+              // synthetic/demo data
+              const base = ['05766075','12345012','00456721','00456791','00015692'];
+              const meters = DEFAULT_CAMS.map((c, i) => ({
+                id: c.id, name: c.name, reading: base[i], unit: 'LITERS', updatedAt: Date.now()
+              }));
+              setData({ mode:'demo', meters });
+            }
+          }
+        }
+
+        tryFetch();
+        const t = setInterval(tryFetch, 3000);
+        return () => { stop = true; clearInterval(t); controller.abort(); };
+      }, [setAppMode]);
+
+      return data;
+    }
+
+    function App(){
+      const [mode, setMode] = useState('detecting');
+      const [streamErr, setStreamErr] = useState(false);
+      const data = useLiveData(setMode);
+
+      useEffect(() => {
+        const pill = document.getElementById('mode-pill');
+        if(mode === 'live'){ pill.textContent='Live Mode'; pill.className='pill ok'; }
+        else if(mode === 'demo'){ pill.textContent='Demo Mode'; pill.className='pill warn'; }
+        else { pill.textContent='Detecting…'; pill.className='pill warn'; }
+      }, [mode]);
+
+      useEffect(() => {
+        const st = document.getElementById('status-text');
+        if(mode==='live' && !streamErr) st.textContent = 'Connected to API and streams.';
+        else if(mode==='live' && streamErr) st.textContent = 'API live, some streams unavailable.';
+        else if(mode==='demo') st.textContent = 'Running with demo data. Expose /api/readings and /stream/cam{1-5} to go live.';
+        else st.textContent = 'Detecting services…';
+
+        const ep = document.getElementById('endpoint-info');
+        ep.textContent = (API_BASE||location.origin) + '/api/readings · ' + (API_BASE||location.origin) + '/stream/cam{1-5}';
+      }, [mode, streamErr]);
+
+      // normalize incoming data to UI shape
+      const meters = (data.meters && data.meters.length ? data.meters : DEFAULT_CAMS.map(c=>({id:c.id, name:c.name, reading:'——', unit:'', updatedAt: null})))
+        .slice(0,5);
+
+      return (
+        React.createElement(React.Fragment, null,
+          meters.map((m, idx) => {
+            const cam = DEFAULT_CAMS[idx];
+            const disp = `${m.reading || '——'}${m.unit? ' '+m.unit : ''}`;
+            const r = { display: disp, updatedAt: m.updatedAt };
+            return React.createElement(Card, { key: cam.id, cam, reading: r, onStreamError: ()=>setStreamErr(true) });
+          })
+        )
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('app'));
+    root.render(React.createElement(App));
+  })();
+  </script>
+</body>
+</html>
