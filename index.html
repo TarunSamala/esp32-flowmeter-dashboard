@@ -67,138 +67,90 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script>
-  (function(){
-    const { useEffect, useState, useRef } = React;
+(function(){
+  const { useEffect, useState } = React;
 
-    const DEFAULT_CAMS = [
-      { id: 1, name: 'ME Flowmeter' },
-      { id: 2, name: 'Boiler Flowmeter' },
-      { id: 3, name: 'GE IN Flowmeter' },
-      { id: 4, name: 'GE OUT Flowmeter' },
-      { id: 5, name: 'Cylinder Oil Flowmeter' },
-    ];
+  const DEFAULT_CAMS = [
+    { id: 1, name: 'ME Flowmeter', url: 'http://192.168.0.59:81/stream' }, // ESP32 live camera
+    { id: 2, name: 'Boiler Flowmeter', url: '' },
+    { id: 3, name: 'GE IN Flowmeter', url: '' },
+    { id: 4, name: 'GE OUT Flowmeter', url: '' },
+    { id: 5, name: 'Cylinder Oil Flowmeter', url: '' },
+  ];
 
-    const API_BASE = (new URLSearchParams(location.search).get('apiBase')) || '';
+  function formatTs(ts){
+    try {
+      const d = ts ? new Date(ts) : new Date();
+      return d.toLocaleString();
+    } catch(e){ return String(ts || ''); }
+  }
 
-    function formatTs(ts){
-      try {
-        const d = ts ? new Date(ts) : new Date();
-        return d.toLocaleString();
-      } catch(e){ return String(ts || ''); }
-    }
-
-    function Card({ cam, reading, onStreamError }){
-      const [imgOk, setImgOk] = useState(true);
-      const src = API_BASE + `/stream/cam${cam.id}`; // expected MJPEG
-      return (
-        React.createElement('div', { className: 'card' },
-          React.createElement('header', null,
-            React.createElement('h3', null, cam.name)
-          ),
-          React.createElement('div', { className: 'feed' },
-            imgOk ? React.createElement('img', {
-              src,
-              alt: cam.name,
-              onError: () => { setImgOk(false); onStreamError && onStreamError(); },
-            }) : React.createElement('div', { className: 'fallback' },
-              React.createElement('div', {style:{textAlign:'center', padding:'12px'}},
-                React.createElement('div', {style:{fontSize:'13px', marginBottom:'6px', color:'#9fb0db'}}, 'No Stream'),
-                React.createElement('div', {style:{fontSize:'12px', color:'#7d8db1'}}, 'Demo preview active')
+  function Card({ cam, reading }){
+    const [imgOk, setImgOk] = useState(true);
+    return (
+      React.createElement('div', { className: 'card' },
+        React.createElement('header', null,
+          React.createElement('h3', null, cam.name)
+        ),
+        React.createElement('div', { className: 'feed' },
+          cam.url && imgOk
+            ? React.createElement('img', {
+                src: cam.url,
+                alt: cam.name,
+                onError: () => setImgOk(false),
+              })
+            : React.createElement('div', { className: 'fallback' },
+                React.createElement('div', {style:{textAlign:'center', padding:'12px'}},
+                  React.createElement('div', {style:{fontSize:'13px', marginBottom:'6px', color:'#9fb0db'}}, 'No Stream'),
+                  React.createElement('div', {style:{fontSize:'12px', color:'#7d8db1'}}, 'Demo preview active')
+                )
               )
-            )
+        ),
+        React.createElement('div', { className: 'meta' },
+          React.createElement('div', null,
+            React.createElement('div', { className: 'label' }, 'Reading'),
+            React.createElement('div', { className: 'reading' }, reading.display)
           ),
-          React.createElement('div', { className: 'meta' },
-            React.createElement('div', null,
-              React.createElement('div', { className: 'label' }, 'Reading'),
-              React.createElement('div', { className: 'reading' }, reading.display)
-            ),
-            React.createElement('div', { className: 'ts' }, formatTs(reading.updatedAt))
-          )
+          React.createElement('div', { className: 'ts' }, formatTs(reading.updatedAt))
         )
-      );
-    }
+      )
+    );
+  }
 
-    function useLiveData(setAppMode){
-      const [data, setData] = useState({ mode:'detecting', meters: [] });
-      const errorCount = useRef(0);
+  function App(){
+    const [mode, setMode] = useState('live');
 
-      useEffect(() => {
-        let stop = false;
-        const controller = new AbortController();
+    useEffect(() => {
+      const pill = document.getElementById('mode-pill');
+      pill.textContent = 'Live Mode';
+      pill.className = 'pill ok';
+      document.getElementById('status-text').textContent = 'Connected to ESP32-S3 camera stream.';
+      document.getElementById('endpoint-info').textContent = 'Direct ESP32 Stream Mode';
+    }, []);
 
-        async function tryFetch(){
-          try {
-            const r = await fetch(API_BASE + '/api/readings', { signal: controller.signal, cache:'no-store' });
-            if(!r.ok) throw new Error('HTTP '+r.status);
-            const j = await r.json();
-            if(stop) return;
-            setData({ mode:'live', meters: j.meters });
-            setAppMode('live');
-            errorCount.current = 0;
-          } catch(e){
-            errorCount.current++;
-            if(errorCount.current > 1){ // after first failure, switch to demo
-              setAppMode('demo');
-              // synthetic/demo data
-              const base = ['05766075','12345012','00456721','00456791','00015692'];
-              const meters = DEFAULT_CAMS.map((c, i) => ({
-                id: c.id, name: c.name, reading: base[i], unit: 'LITERS', updatedAt: Date.now()
-              }));
-              setData({ mode:'demo', meters });
-            }
-          }
-        }
+    const meters = DEFAULT_CAMS.map((c) => ({
+      id: c.id,
+      name: c.name,
+      reading: '',
+      unit: '',
+      updatedAt: Date.now(),
+    }));
 
-        tryFetch();
-        const t = setInterval(tryFetch, 3000);
-        return () => { stop = true; clearInterval(t); controller.abort(); };
-      }, [setAppMode]);
+    return (
+      React.createElement(React.Fragment, null,
+        meters.map((m, idx) => {
+          const cam = DEFAULT_CAMS[idx];
+          const disp = `${m.reading || '——'}${m.unit? ' '+m.unit : ''}`;
+          const r = { display: disp, updatedAt: m.updatedAt };
+          return React.createElement(Card, { key: cam.id, cam, reading: r });
+        })
+      )
+    );
+  }
 
-      return data;
-    }
-
-    function App(){
-      const [mode, setMode] = useState('detecting');
-      const [streamErr, setStreamErr] = useState(false);
-      const data = useLiveData(setMode);
-
-      useEffect(() => {
-        const pill = document.getElementById('mode-pill');
-        if(mode === 'live'){ pill.textContent='Live Mode'; pill.className='pill ok'; }
-        else if(mode === 'demo'){ pill.textContent='Demo Mode'; pill.className='pill warn'; }
-        else { pill.textContent='Detecting…'; pill.className='pill warn'; }
-      }, [mode]);
-
-      useEffect(() => {
-        const st = document.getElementById('status-text');
-        if(mode==='live' && !streamErr) st.textContent = 'Connected to API and streams.';
-        else if(mode==='live' && streamErr) st.textContent = 'API live, some streams unavailable.';
-        else if(mode==='demo') st.textContent = 'Running with demo data. Expose /api/readings and /stream/cam{1-5} to go live.';
-        else st.textContent = 'Detecting services…';
-
-        const ep = document.getElementById('endpoint-info');
-        ep.textContent = (API_BASE||location.origin) + '/api/readings · ' + (API_BASE||location.origin) + '/stream/cam{1-5}';
-      }, [mode, streamErr]);
-
-      // normalize incoming data to UI shape
-      const meters = (data.meters && data.meters.length ? data.meters : DEFAULT_CAMS.map(c=>({id:c.id, name:c.name, reading:'——', unit:'', updatedAt: null})))
-        .slice(0,5);
-
-      return (
-        React.createElement(React.Fragment, null,
-          meters.map((m, idx) => {
-            const cam = DEFAULT_CAMS[idx];
-            const disp = `${m.reading || '——'}${m.unit? ' '+m.unit : ''}`;
-            const r = { display: disp, updatedAt: m.updatedAt };
-            return React.createElement(Card, { key: cam.id, cam, reading: r, onStreamError: ()=>setStreamErr(true) });
-          })
-        )
-      );
-    }
-
-    const root = ReactDOM.createRoot(document.getElementById('app'));
-    root.render(React.createElement(App));
-  })();
-  </script>
+  const root = ReactDOM.createRoot(document.getElementById('app'));
+  root.render(React.createElement(App));
+})();
+</script>
 </body>
 </html>
